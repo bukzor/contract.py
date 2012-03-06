@@ -6,6 +6,12 @@ class InvalidContract(Exception):
 class FailedContract(Exception):
     pass
 
+def name(x):
+    if hasattr(x, '__name__'):
+        return x.__name__ 
+    else:
+        return repr(x)
+
 def check_value(schema, value, debug=False):
     from collections import deque
 
@@ -20,6 +26,8 @@ def check_value(schema, value, debug=False):
             print 'CHECKING:', schema, value, check_length
         if isinstance(schema, type):
             expected_type = schema
+        elif isinstance(schema, MultiType):
+            expected_type = schema
         else:
             expected_type = type(schema)
 
@@ -27,10 +35,14 @@ def check_value(schema, value, debug=False):
             if debug:
                 print 'type miss-match\n'
             raise FailedContract('expected a %s, got a %s' % (
-                    expected_type.__name__, type(value).__name__)
+                    name(expected_type), name(type(value)))
             )
 
-        if schema is expected_type or schema is None:
+        if (
+                schema is expected_type or
+                schema is None or
+                isinstance(schema, MultiType)
+        ):
             # We just wanted to check types. All done.
             pass
         elif expected_type is tuple:
@@ -71,7 +83,7 @@ def check_value(schema, value, debug=False):
 
 class contract(object):
     def __init__(self, input_schema, output_schema, debug=False):
-        if not isinstance(input_schema, tuple):
+        if not type(input_schema) is tuple:
             input_schema = (input_schema,)
         self.__args = (input_schema, output_schema)
         self.debug = debug
@@ -117,9 +129,19 @@ class contract(object):
         (input_schema, output_schema) = self.__args
         if isinstance(input_schema, tuple) and len(input_schema) == 1:
             input_schema = input_schema[0]
-        if hasattr(input_schema, '__name__'):
-            input_schema = input_schema.__name__
-        if hasattr(output_schema, '__name__'):
-            output_schema = output_schema.__name__
-        return 'contract(%s, %s)' % (input_schema, output_schema)
+        return 'contract(%s, %s)' % (name(input_schema), name(output_schema))
 
+class MultiType(tuple):
+    def __new__(cls, *types):
+        types = tuple(t if isinstance(t, type) else type(t) for t in types)
+        return super(MultiType, cls).__new__(cls, types)
+
+    def __repr__(self):
+        return 'MultiType(%s)' % ', '.join(name(t) for t in self)
+
+class Nullable(MultiType):
+    def __new__(cls, *types):
+        return super(Nullable, cls).__new__(cls, None, *types)
+
+    def __repr__(self):
+        return 'Nullable(%s)' % ', '.join(name(t) for t in self[1:])

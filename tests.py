@@ -1,4 +1,4 @@
-from contract import contract, InvalidContract, FailedContract
+from contract import contract, InvalidContract, FailedContract, MultiType, Nullable
 import unittest
 
 class TestContracts(unittest.TestCase):
@@ -161,6 +161,41 @@ class TestContracts(unittest.TestCase):
             @contract(str)
             def f():
                 pass
+
+    def test_multitype(self):
+        @contract(MultiType(float, int), MultiType(int, None))
+        def f(x):
+            if x == 0:
+                return None
+            else:
+                return x * x
+
+        y = None
+        # this is ok
+        self.assertEqual(f(0), None)
+        self.assertEqual(f(10), 100)
+
+        # this is not ok
+        self.assertRaisesRegexp(FailedContract, r'^expected a MultiType\(int, NoneType\), got a float$', f, 1.0)
+        self.assertRaisesRegexp(FailedContract, r'^expected a MultiType\(float, int\), got a str$', f, "blerg")
+
+
+    def test_nullable(self):
+        @contract(MultiType(float, int), Nullable(int))
+        def f(x):
+            if x == 0:
+                return None
+            else:
+                return x * x
+
+        y = None
+        # this is ok
+        self.assertEqual(f(0), None)
+        self.assertEqual(f(10), 100)
+
+        # this is not ok
+        self.assertRaisesRegexp(FailedContract, r'^expected a Nullable\(int\), got a float$', f, 1.0)
+
 
 if __name__ == '__main__':
     unittest.main()
