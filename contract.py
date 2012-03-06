@@ -3,242 +3,123 @@ import re
 class InvalidContract(Exception):
     pass
 
-class AmbiguousContract(Exception):
-    pass
-
 class FailedContract(Exception):
     pass
 
-class InternalContractError(Exception):
-    pass
+def check_value(schema, value, debug=False):
+    from collections import deque
 
-t_type = ('type', r'[A-Za-z]+')
-t_arrow = ('arrow', r'->')
-t_lparen = ('lparen', r'\(')
-t_rparen = ('rparen', r'\)')
-t_comma = ('comma', r',')
-t_lbrack = ('lbrack', r'\[')
-t_rbrack = ('rbrack', r'\]')
-t_lbrace = ('lbrace', r'{')
-t_rbrace = ('rbrace', r'}')
-t_colon = ('colon', r':')
-
-root = 'fun'
-rules = [
-    ('fun', ('fixed_tup', t_arrow, 'typ')),
-
-    ('fixed_tup', (t_lparen, t_comma, t_rparen)),
-    ('fixed_tup', (t_lparen, 'typ', t_comma, 'more_fixed_tup', t_rparen)),
-    ('more_fixed_tup', ()),
-    ('more_fixed_tup', ('typ', 'more_fixed_tup')),
-
-    ('list', (t_lbrack, 'typ', t_rbrack)),
-
-    ('set', (t_lbrace, 'typ', t_rbrace)),
-
-    ('dict', ('typ', t_colon, 'typ')),
-
-    ('typ', ('fixed_tup',)),
-    ('typ', ('list',)),
-    ('typ', ('set',)),
-    ('typ', ('dict',)),
-    ('typ', (t_type,)),
-    ('typ', (t_lparen, 'typ', t_rparen)),
-    ('typ', ('fun',))
-    ]
-
-def rule_matcher(rule, lhs, *rhs):
-    if rule['lhs'] == lhs:
-        if len(rule['rhs']) == len(rhs):
-            for rhs_1, rhs_2 in zip(rhs, rule['rhs']):
-                if type(rhs_1) == tuple:
-                    if rhs_2.get('term') != rhs_1[0]:
-                        return False
-                elif type(rhs_1) == str:
-                    if rhs_2.get('lhs') != rhs_1:
-                        return False
-                else:
-                    assert False
-            return True
-    return False
-
-def earley(s):
-    # initialize chart
-    chart = [[] for _ in range(len(s) + 1)]
-    for r_lhs, r_rhs in rules:
-        if r_lhs == root:
-            chart[0].append({
-                    'begin': 0,
-                    'lhs': r_lhs,
-                    'uncompleted_rhs': tuple(r_rhs),
-                    'rhs': (),
-                    'span': ''
-                    })
-    # fill in each column
-    for i in range(len(chart)):
-        while True:
-            new_states = list(chart[i])
-            for state in chart[i]:
-                # predict?
-                if state['uncompleted_rhs']:
-                    for r_lhs, r_rhs in rules:
-                        if state['uncompleted_rhs'][0] == r_lhs: # this only works because of the tuple-wrapping for terms.
-                            new_state = {
-                                'begin': i,
-                                'lhs': r_lhs,
-                                'uncompleted_rhs': tuple(r_rhs),
-                                'rhs': (),
-                                'span': ''
-                                }
-                            if new_state not in new_states:
-                                new_states.append(new_state)
-                # scan?
-                if state['uncompleted_rhs'] and type(state['uncompleted_rhs'][0]) is tuple:
-                    term, term_re = state['uncompleted_rhs'][0]
-                    m = re.match(term_re, s[i:])
-                    if m:
-                        new_state = {
-                            'begin': state['begin'],
-                            'lhs': state['lhs'],
-                            'uncompleted_rhs': state['uncompleted_rhs'][1:],
-                            'rhs': state['rhs'] + ({'term': term, 'token': m.group(0)},),
-                            'span': state['span'] + m.group(0)
-                            }
-                        chart[i + len(m.group(0))].append(new_state)
-                # complete?
-                if not state['uncompleted_rhs']:
-                    for previous_state in chart[state['begin']]:
-                        if previous_state['uncompleted_rhs'] and previous_state['uncompleted_rhs'][0] == state['lhs']:
-                            new_state = {
-                                'begin': previous_state['begin'],
-                                'lhs': previous_state['lhs'],
-                                'uncompleted_rhs': tuple(previous_state['uncompleted_rhs'][1:]),
-                                'rhs': previous_state['rhs'] + (state,),
-                                'span': previous_state['span'] + state['span']
-                                }
-                            if new_state not in new_states:
-                                new_states.append(new_state)
-            # process this set of states again if it's gotten bigger.
-            if len(new_states) > len(chart[i]):
-                chart[i] = new_states
-            else:
-                break
-    # return the last column after we pretty it up a bit.
-    complete = filter(lambda state: state['begin'] == 0 and not state['uncompleted_rhs'] and state['lhs'] == root, chart[-1])
-    def pretty(state):
-        if 'term' in state:
-            return {'term': state['term'], 'token': state['token']}
+    # We'll be using this queue in a leftward manner, ie append and popleft
+    q = deque()
+    q.append((schema, value))
+    # No need to check argument count at the top level, python functions do this.
+    check_length = ''
+    while q:
+        schema, value = q.popleft()
+        if debug:
+            print 'CHECKING:', schema, value, check_length
+        if isinstance(schema, type):
+            expected_type = schema
         else:
-            return {'lhs': state['lhs'], 'rhs': tuple(pretty(rhs) for rhs in state['rhs']), 'span': state['span']}
-    return map(pretty, complete)
+            expected_type = type(schema)
 
-def check_value(schema, value):
-    # fun
-    if rule_matcher(schema, 'fun', 'fixed_tup', t_arrow, 'typ'):
-        if type(value).__name__ == 'function':
-            if getattr(value, '__contract__', None) is not None:
-                # this is so horrible, i am a horrible
-                expected_contract = '%s->%s' % (schema['rhs'][0]['span'], schema['rhs'][2]['span'])
-                if value.__contract__ != expected_contract:
-                    raise FailedContract('the contract is %s, we wanted %s' % (value.__contract__, expected_contract))
-            else:
-                raise FailedContract('expected a contract-wrapped method')
-        else:
-            raise FailedContract('expected method, got %s' % type(value).__name__)
+        if not isinstance(value, expected_type):
+            if debug:
+                print 'type miss-match\n'
+            raise FailedContract('expected a %s, got a %s' % (
+                    expected_type.__name__, type(value).__name__)
+            )
 
-    # typ
-    elif rule_matcher(schema, 'typ', 'fixed_tup'):
-        check_value(schema['rhs'][0], value)
-    elif rule_matcher(schema, 'typ', 'list'):
-        check_value(schema['rhs'][0], value)
-    elif rule_matcher(schema, 'typ', 'set'):
-        check_value(schema['rhs'][0], value)
-    elif rule_matcher(schema, 'typ', 'dict'):
-        check_value(schema['rhs'][0], value)
-    elif rule_matcher(schema, 'typ', t_type):
-        expect_type = schema['rhs'][0]['token']
-        if expect_type != type(value).__name__:
-            raise FailedContract('expected type %s, got type %s' % (expect_type, type(value).__name__))
-    elif rule_matcher(schema, 'typ', t_lparen, 'typ', t_rparen):
-        check_value(schema['rhs'][1], value)
-    elif rule_matcher(schema, 'typ', 'fun'):
-        check_value(schema['rhs'][0], value)
+        if schema is expected_type or schema is None:
+            # We just wanted to check types. All done.
+            pass
+        elif expected_type is tuple:
+            if check_length:
+                schema_len = len(schema)
+                value_len = len(value)
+                if schema_len != value_len:
+                    raise FailedContract('expected a %s-ple, got a %s-ple' % (
+                        schema_len, value_len
+                    ))
 
-    # list
-    elif rule_matcher(schema, 'list', t_lbrack, 'typ', t_rbrack):
-        if type(value) == list:
+            # check the contained values too
+            #TODO: use izip, for memory efficiency
+            for schema, value in zip(schema, value):
+                q.append((schema, value))
+        elif hasattr(expected_type, '__iter__'):
+            # check the contained values too
+            if len(schema) != 1:
+                raise InvalidContract("Expected just one type to be checked: %r" % schema)
+
+            if hasattr(schema, 'items'):
+                schema = schema.items()
+                # No need to worry about the "no value.items" case.
+                # We've already shown that isinstance(expected_type, value)
+                value = value.items()
+
+            s = iter(schema).next()
             for v in value:
-                check_value(schema['rhs'][1], v)
+                q.append((s, v))
+        elif isinstance(schema, contract):
+            if schema != value:
+                raise FailedContract('expected %s, got %s' % (schema, value))
         else:
-            raise FailedContract('expected a list, got a %s' % type(value).__name__)
+            raise ValueError('Unhandled: %r' % ((schema, value),))
 
-    # set
-    elif rule_matcher(schema, 'set', t_lbrace, 'typ', t_rbrace):
-        if type(value) == set:
-            for v in value:
-                check_value(schema['rhs'][1], v)
+        # We do check tuple lengths on all but the top level
+        check_length = 'check-length'
+
+class contract(object):
+    def __init__(self, input_schema, output_schema, debug=False):
+        if not isinstance(input_schema, tuple):
+            input_schema = (input_schema,)
+        self.__args = (input_schema, output_schema)
+        self.debug = debug
+        self.func = None
+
+    def __call__(self, *args):
+        """This object is often used as a decorator"""
+        if self.func is None:
+            assert len(args) == 1, \
+                    "Doesn't look like a decorator call: %r" % args
+            self.func = args[0]
+            return self
         else:
-            raise FailedContract('expected a set, got a %s' % type(value).__name__)
+            return self.check(self.func, args)
 
-    # dict
-    elif rule_matcher(schema, 'dict', 'typ', t_colon, 'typ'):
-        if type(value) == dict:
-            for k, v in value.iteritems():
-                check_value(schema['rhs'][0], k)
-                check_value(schema['rhs'][2], v)
+    def check(self, func, args):
+        """
+        Check that the function (with these args) follows the contract
+        This calls the function, and returns the resulting value
+        """
+        input_schema, output_schema = self.__args
+        if self.debug:
+            print self.__args
+
+        check_value(input_schema, args, debug=self.debug)
+        # check the output..
+        output = func(*args)
+        check_value(output_schema, output, debug=self.debug)
+        # if it got this far, we're good.
+        return output
+    
+    def __eq__(self, other):
+        if isinstance(other, contract):
+            return self.__args == other.__args
         else:
-            raise FailedContract('expected a dict, got a %s' % type(value).__name__)
+            return False
 
-    # fixed_tup, more_fixed_tup
-    elif rule_matcher(schema, 'fixed_tup', t_lparen, t_comma, t_rparen):
-        if value != ():
-            raise FailedContract('expected the empty tuple, got %s' % value)
-    elif rule_matcher(schema, 'fixed_tup', t_lparen, 'typ', t_comma, 'more_fixed_tup', t_rparen):
-        expected = [schema['rhs'][1]]
-        p = schema['rhs'][3]
-        while True:
-            if rule_matcher(p, 'more_fixed_tup'):
-                break
-            elif rule_matcher(p, 'more_fixed_tup', 'typ', 'more_fixed_tup'):
-                expected.append(p['rhs'][0])
-                p = p['rhs'][1]
-            else:
-                raise InternalContractError('the parsetree is fucked right here')
-        if type(value) != tuple:
-            raise FailedContract('expected a %s-ple, got a %s' % (len(expected), type(value).__name__))
-        if len(value) != len(expected):
-            raise FailedContract('expected a %s-ple, got a %s-ple' % (len(expected), len(value)))
-        [check_value(e, v) for e, v in zip(expected, value)]
+    def __ne__(self, other):
+        return not self == other
 
-    # we're fucked!
-    else:
-        import pprint
-        raise InternalContractError('check_value() is incompletely defined (no case for %s)!' % pprint.PrettyPrinter().pformat(schema))
-
-def contract(s, debug=False):
-    # parse it.
-    s = s.translate(None, ' \t\n')
-    exprs = earley(s)
-    if debug:
-        import pprint
-        pprint.PrettyPrinter().pprint(exprs)
-    if len(exprs) == 0:
-        raise InvalidContract('contract could not be parsed!')
-    if len(exprs) > 1:
-        raise AmbiguousContract('contract is not unambiguous!')
-    parse = exprs[0]
-    # here's the wrapper that enforces the contract.
-    def wrapped(f):
-        def inner(*args):
-            # check the input..
-            check_value(parse['rhs'][0], args)
-            # check the output..
-            output = f(*args)
-            check_value(parse['rhs'][2], output)
-            # if it got this far, we're good.
-            return output
-        # this is horrible, there needs to be some enforcement of a canonical form for this to really work
-        inner.__contract__ = s
-        return inner
-    return wrapped
+    def __repr__(self):
+        """It's often useful for repr(x) to give an executable contructor form"""
+        (input_schema, output_schema) = self.__args
+        if isinstance(input_schema, tuple) and len(input_schema) == 1:
+            input_schema = input_schema[0]
+        if hasattr(input_schema, '__name__'):
+            input_schema = input_schema.__name__
+        if hasattr(output_schema, '__name__'):
+            output_schema = output_schema.__name__
+        return 'contract(%s, %s)' % (input_schema, output_schema)
 
